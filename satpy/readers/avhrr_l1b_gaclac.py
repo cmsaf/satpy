@@ -188,7 +188,11 @@ class GACLACFile(BaseFileHandler):
             res[xdim] = xcoords
 
         for attr in self.reader.meta_data:
-            res.attrs[attr] = self.reader.meta_data[attr]
+            # Midnight/missing scanlines change if slicing/stripping
+            if attr not in ['midnight_scanline', 'missing_scanlines']:
+                res.attrs[attr] = self.reader.meta_data[attr]
+        res.attrs['midnight_scanline'] = self.midnight_scanline
+        res.attrs['missing_scanlines'] = self.missing_scanlines
         res.attrs['platform_name'] = self.reader.spacecraft_name
         res.attrs['orbit_number'] = self.filename_info['orbit_number']
         res.attrs['sensor'] = self.sensor

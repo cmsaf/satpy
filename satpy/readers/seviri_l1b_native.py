@@ -194,6 +194,8 @@ class NativeMSGFileHandler(BaseFileHandler):
         self.platform_id = data15hd[
             'SatelliteStatus']['SatelliteDefinition']['SatelliteId']
         self.mda['platform_name'] = "Meteosat-" + SATNUM[self.platform_id]
+        self.mda['offset_corrected'] = data15hd['GeometricProcessing'][
+             'EarthModel']['TypeOfEarthModel'] == 2
 
         equator_radius = data15hd['GeometricProcessing'][
                              'EarthModel']['EquatorialRadius'] * 1000.
@@ -480,6 +482,8 @@ class NativeMSGFileHandler(BaseFileHandler):
             dataset.attrs['standard_name'] = dataset_info['standard_name']
             dataset.attrs['platform_name'] = self.mda['platform_name']
             dataset.attrs['sensor'] = 'seviri'
+            dataset.attrs['georef_offset_corrected'] = self.mda[
+                'offset_corrected']
 
             # Orbital parameters
             actual_lon, actual_lat, actual_alt = self._get_satpos()

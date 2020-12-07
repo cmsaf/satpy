@@ -18,7 +18,9 @@
 """Test the MSG common (native and hrit format) functionionalities."""
 
 import unittest
+
 import numpy as np
+
 from satpy.readers.seviri_base import dec10216, chebyshev, get_cds_time
 
 

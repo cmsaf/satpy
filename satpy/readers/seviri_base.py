@@ -332,23 +332,29 @@ class MpefProductHeader(object):
 mpef_product_header = MpefProductHeader().get()
 
 
-class SEVIRICalibrationHandler(object):
-    """Calibration handler for SEVIRI HRIT- and native-formats."""
+class SEVIRICalibrationAlgorithm:
+    """SEVIRI calibration algorithms."""
 
-    def _convert_to_radiance(self, data, gain, offset):
+    def __init__(self, platform_id, scan_time):
+        """Initialize the calibration algorithm."""
+        self._platform_id = platform_id
+        self._scan_time = scan_time
+
+    def convert_to_radiance(self, data, gain, offset):
         """Calibrate to radiance."""
+        data = data.where(data > 0)
         return (data * gain + offset).clip(0.0, None)
 
     def _erads2bt(self, data, channel_name):
         """Convert effective radiance to brightness temperature."""
-        cal_info = CALIB[self.platform_id][channel_name]
+        cal_info = CALIB[self._platform_id][channel_name]
         alpha = cal_info["ALPHA"]
         beta = cal_info["BETA"]
-        wavenumber = CALIB[self.platform_id][channel_name]["VC"]
+        wavenumber = CALIB[self._platform_id][channel_name]["VC"]
 
         return (self._tl15(data, wavenumber) - beta) / alpha
 
-    def _ir_calibrate(self, data, channel_name, cal_type):
+    def ir_calibrate(self, data, channel_name, cal_type):
         """Calibrate to brightness temperature."""
         if cal_type == 1:
             # spectral radiances
@@ -362,7 +368,7 @@ class SEVIRICalibrationHandler(object):
     def _srads2bt(self, data, channel_name):
         """Convert spectral radiance to brightness temperature."""
         a__, b__, c__ = BTFIT[channel_name]
-        wavenumber = CALIB[self.platform_id][channel_name]["VC"]
+        wavenumber = CALIB[self._platform_id][channel_name]["VC"]
         temp = self._tl15(data, wavenumber)
 
         return a__ * temp * temp + b__ * temp + c__
@@ -372,14 +378,90 @@ class SEVIRICalibrationHandler(object):
         return ((C2 * wavenumber) /
                 np.log((1.0 / data) * C1 * wavenumber ** 3 + 1.0))
 
-    def _vis_calibrate(self, data, solar_irradiance):
+    def vis_calibrate(self, data, solar_irradiance):
         """Calibrate to reflectance.
 
         This uses the method described in Conversion from radiances to
         reflectances for SEVIRI warm channels: https://tinyurl.com/y67zhphm
         """
         reflectance = np.pi * data * 100.0 / solar_irradiance
-        return apply_earthsun_distance_correction(reflectance, self.start_time)
+        return apply_earthsun_distance_correction(reflectance, self._scan_time)
+
+
+class SEVIRICalibrationHandler:
+    """Calibration handler for SEVIRI HRIT-, native- and netCDF-formats.
+
+    Handles selection of calibration coefficients and calls the appropriate
+    calibration algorithm.
+    """
+
+    def __init__(self, platform_id, channel_name, coefs, calib_mode, scan_time):
+        """Initialize the calibration handler."""
+        self._platform_id = platform_id
+        self._channel_name = channel_name
+        self._coefs = coefs
+        self._calib_mode = calib_mode.upper()
+        self._scan_time = scan_time
+        self._algo = SEVIRICalibrationAlgorithm(
+            platform_id=self._platform_id,
+            scan_time=self._scan_time
+        )
+
+        valid_modes = ('NOMINAL', 'GSICS')
+        if self._calib_mode not in valid_modes:
+            raise ValueError(
+                'Invalid calibration mode: {}. Choose one of {}'.format(
+                    self._calib_mode, valid_modes)
+            )
+
+    def calibrate(self, data, calibration):
+        """Calibrate the given data."""
+        if calibration == 'counts':
+            res = data
+        elif calibration in ['radiance', 'reflectance',
+                             'brightness_temperature']:
+            gain, offset = self.get_gain_offset()
+            res = self._algo.convert_to_radiance(
+                data.astype(np.float32), gain, offset
+            )
+        else:
+            raise ValueError(
+                'Invalid calibration {} for channel {}'.format(
+                    calibration, self._channel_name
+                )
+            )
+
+        if calibration == 'reflectance':
+            solar_irradiance = CALIB[self._platform_id][self._channel_name]["F"]
+            res = self._algo.vis_calibrate(res, solar_irradiance)
+        elif calibration == 'brightness_temperature':
+            res = self._algo.ir_calibrate(
+                res, self._channel_name, self._coefs['radiance_type']
+            )
+
+        return res
+
+    def get_gain_offset(self):
+        """Get gain & offset for calibration from counts to radiance.
+
+        Choices for internal coefficients are nominal or GSICS. External
+        coefficients take precedence.
+        """
+        coefs = self._coefs['coefs']
+
+        # Select internal coefficients for the given calibration mode
+        if self._calib_mode != 'GSICS' or self._channel_name in VIS_CHANNELS:
+            # GSICS doesn't have calibration coeffs for VIS channels
+            internal_gain = coefs['NOMINAL']['gain']
+            internal_offset = coefs['NOMINAL']['offset']
+        else:
+            internal_gain = coefs['GSICS']['gain']
+            internal_offset = coefs['GSICS']['offset'] * internal_gain
+
+        # Override with external coefficients, if any.
+        gain = coefs['EXTERNAL'].get('gain', internal_gain)
+        offset = coefs['EXTERNAL'].get('offset', internal_offset)
+        return gain, offset
 
 
 def chebyshev(coefs, time, domain):
@@ -428,3 +510,21 @@ def calculate_area_extent(area_dict):
     aex = np.array([ll_c, ll_r, ur_c, ur_r]) * area_dict['resolution']
 
     return tuple(aex)
+
+
+def create_coef_dict(coefs_nominal, coefs_gsics, radiance_type, ext_coefs):
+    """Create coefficient dictionary expected by calibration class."""
+    return {
+        'coefs': {
+            'NOMINAL': {
+                'gain': coefs_nominal[0],
+                'offset': coefs_nominal[1],
+            },
+            'GSICS': {
+                'gain': coefs_gsics[0],
+                'offset': coefs_gsics[1]
+            },
+            'EXTERNAL': ext_coefs
+        },
+        'radiance_type': radiance_type
+    }

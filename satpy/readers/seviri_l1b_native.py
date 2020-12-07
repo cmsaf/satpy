@@ -54,12 +54,16 @@ from satpy import CHUNK_SIZE
 from pyresample import geometry
 
 from satpy.readers.file_handlers import BaseFileHandler
-from satpy.readers.eum_base import recarray2dict
+from satpy.readers.eum_base import recarray2dict, time_cds_short
 from satpy.readers.seviri_base import (SEVIRICalibrationHandler,
                                        CHANNEL_NAMES, SATNUM,
                                        dec10216, VISIR_NUM_COLUMNS,
                                        VISIR_NUM_LINES, HRV_NUM_COLUMNS,
-                                       create_coef_dict)
+                                       create_coef_dict,
+                                       add_scanline_acq_time,
+                                       get_cds_time,
+                                       NoValidOrbitParams,
+                                       SatelliteLocatorFactory)
 from satpy.readers.seviri_l1b_native_hdr import (GSDTRecords, native_header,
                                                  native_trailer)
 from satpy.readers._geos_area import get_area_definition
@@ -91,6 +95,7 @@ class NativeMSGFileHandler(BaseFileHandler):
         self.mda = {}
         self.mda['is_full_disk'] = True
         self.trailer = {}
+        self.satpos = None
 
         # Read header, prepare dask-array, read trailer
         # Available channels are known only after the header has been read
@@ -139,7 +144,7 @@ class NativeMSGFileHandler(BaseFileHandler):
                 ("time", (np.uint16, 5)),
                 ("lineno", np.uint32),
                 ("chan_id", np.uint8),
-                ("acq_time", (np.uint16, 3)),
+                ("acq_time", time_cds_short),
                 ("line_validity", np.uint8),
                 ("line_rquality", np.uint8),
                 ("line_gquality", np.uint8),
@@ -469,16 +474,32 @@ class NativeMSGFileHandler(BaseFileHandler):
             dataset = None
         else:
             dataset = self.calibrate(xarr, dataset_id)
+            self._add_scanline_acq_time(dataset, dataset_id)
             dataset.attrs['units'] = dataset_info['units']
             dataset.attrs['wavelength'] = dataset_info['wavelength']
             dataset.attrs['standard_name'] = dataset_info['standard_name']
             dataset.attrs['platform_name'] = self.mda['platform_name']
             dataset.attrs['sensor'] = 'seviri'
-            dataset.attrs['orbital_parameters'] = {
-                'projection_longitude': self.mda['projection_parameters']['ssp_longitude'],
-                'projection_latitude': 0.,
-                'projection_altitude': self.mda['projection_parameters']['h']}
 
+            # Orbital parameters
+            actual_lon, actual_lat, actual_alt = self._get_satpos()
+            orbital_parameters = {
+                'projection_longitude': self.mda['projection_parameters'][
+                    'ssp_longitude'],
+                'projection_latitude': 0.,
+                'projection_altitude': self.mda['projection_parameters']['h'],
+                'satellite_nominal_longitude': self.header['15_DATA_HEADER'][
+                    'SatelliteStatus']['SatelliteDefinition'][
+                    'NominalLongitude'],
+                'satellite_nominal_latitude': 0.0
+            }
+            if actual_lon is not None:
+                orbital_parameters.update({
+                    'satellite_actual_longitude': actual_lon,
+                    'satellite_actual_latitude': actual_lat,
+                    'satellite_actual_altitude': actual_alt
+                })
+            dataset.attrs['orbital_parameters'] = orbital_parameters
         return dataset
 
     def calibrate(self, data, dataset_id):
@@ -521,6 +542,69 @@ class NativeMSGFileHandler(BaseFileHandler):
             ext_coefs=self.ext_calib_coefs.get(channel_name, {}),
             radiance_type=radiance_types[band_idx]
         )
+
+    def _add_scanline_acq_time(self, dataset, dataset_id):
+        """Add scanline acquisition time to the given dataset."""
+        if dataset_id['name'] == 'HRV':
+            tline = self._get_acq_time_hrv()
+        else:
+            tline = self._get_acq_time_visir(dataset_id)
+        acq_time = get_cds_time(days=tline['Days'], msecs=tline['Milliseconds'])
+        add_scanline_acq_time(dataset, acq_time)
+
+    def _get_acq_time_hrv(self):
+        """Get raw acquisition time for HRV channel.
+
+        TODO: Duplicates code from get_dataset in order to avoid conflicts
+              with #1438. Should be refactored once that is merged.
+        """
+        tline = self.dask_array['hrv']['acq_time']
+        tline0 = tline[:, 0]
+        tline1 = tline[:, 1]
+        tline2 = tline[:, 2]
+        return np.stack((tline0, tline1, tline2), axis=1).reshape(
+            self.mda['hrv_number_of_lines'])
+
+    def _get_acq_time_visir(self, dataset_id):
+        """Get raw acquisition time for VIS/IR channels.
+
+        TODO: Duplicates code from get_dataset in order to avoid conflicts
+              with #1438. Should be refactored once that is merged.
+        """
+        # Check if there is only 1 channel in the list as a change
+        # is needed in the arrray assignment ie channl id is not present
+        if len(self.mda['channel_list']) == 1:
+            return self.dask_array['visir']['acq_time']
+        i = self.mda['channel_list'].index(dataset_id['name'])
+        return self.dask_array['visir']['acq_time'][:, i]
+
+    def _get_satpos(self):
+        """Get actual satellite position in geodetic coordinates (WGS-84).
+
+        Evaluate orbit polynomials at the start time of the scan.
+
+        TODO: Factorize once #1457 is merged.
+
+        Returns: Longitude [deg east], Latitude [deg north] and Altitude [m]
+        """
+        if self.satpos is None:
+            a = self.mda['projection_parameters']['a']
+            b = self.mda['projection_parameters']['b']
+            time = self.start_time
+            factory = SatelliteLocatorFactory(
+                self.header['15_DATA_HEADER']['SatelliteStatus']['Orbit'][
+                    'OrbitPolynomial']
+            )
+            sat_locator = factory.get_satellite_locator(time)
+            try:
+                lon, lat, alt = sat_locator.get_satpos_geodetic(time, a, b)
+            except NoValidOrbitParams as err:
+                logger.warning(err)
+                lon = lat = alt = None
+
+            # Cache results
+            self.satpos = lon, lat, alt
+        return self.satpos
 
 
 def get_available_channels(header):

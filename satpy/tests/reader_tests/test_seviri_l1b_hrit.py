@@ -28,6 +28,7 @@ import xarray as xr
 from satpy.readers.seviri_l1b_hrit import (HRITMSGFileHandler, HRITMSGPrologueFileHandler, HRITMSGEpilogueFileHandler,
                                            NoValidOrbitParams, pad_data)
 from satpy.tests.utils import make_dataid
+import satpy.tests.reader_tests.test_seviri_l1b_hrit_setup as setup
 from satpy.tests.reader_tests.test_seviri_l1b_calibration import (
     TestFileHandlerCalibrationBase
 )
@@ -35,95 +36,52 @@ from satpy.tests.reader_tests.test_seviri_l1b_calibration import (
 from numpy import testing as npt
 
 
-def new_get_hd(instance, hdr_info):
-    """Generate some metadata."""
-    instance.mda = {'spectral_channel_id': 1}
-    instance.mda.setdefault('number_of_bits_per_pixel', 10)
+class TestHRITMSGBase(unittest.TestCase):
+    """Baseclass for SEVIRI HRIT reader tests."""
 
-    instance.mda['projection_parameters'] = {'a': 6378169.00,
-                                             'b': 6356583.80,
-                                             'h': 35785831.00,
-                                             'SSP_longitude': 0.0}
-    instance.mda['orbital_parameters'] = {}
-    instance.mda['total_header_length'] = 12
+    def assert_attrs_equal(self, attrs, attrs_exp):
+        """Assert equality of dataset attributes."""
+        # Test attributes (just check if raw metadata is there and then remove
+        # it before checking the remaining attributes)
+        self.assertIn('raw_metadata', attrs)
+        attrs.pop('raw_metadata')
+        self.assertDictEqual(attrs, attrs_exp)
 
 
-class TestHRITMSGFileHandlerHRV(unittest.TestCase):
+class TestHRITMSGFileHandlerHRV(TestHRITMSGBase):
     """Test the HRITFileHandler."""
 
-    @mock.patch('satpy.readers.seviri_l1b_hrit.np.fromfile')
-    def setUp(self, fromfile):
+    def setUp(self):
         """Set up the hrit file handler for testing HRV."""
-        m = mock.mock_open()
-        fromfile.return_value = np.array([(1, 2)], dtype=[('total_header_length', int),
-                                                          ('hdr_id', int)])
-
-        with mock.patch('satpy.readers.hrit_base.open', m, create=True) as newopen:
-            with mock.patch('satpy.readers.seviri_l1b_hrit.CHANNEL_NAMES'):
-                with mock.patch.object(HRITMSGFileHandler, '_get_hd', new=new_get_hd):
-                    newopen.return_value.__enter__.return_value.tell.return_value = 1
-                    prologue = mock.MagicMock()
-                    prologue.prologue = {"SatelliteStatus": {"SatelliteDefinition": {"SatelliteId": 324,
-                                                                                     "NominalLongitude": 47}},
-                                         'GeometricProcessing': {'EarthModel': {'TypeOfEarthModel': 2,
-                                                                                'NorthPolarRadius': 10,
-                                                                                'SouthPolarRadius': 10,
-                                                                                'EquatorialRadius': 10}},
-                                         'ImageDescription': {'ProjectionDescription': {'LongitudeOfSSP': 0.0},
-                                                              'Level15ImageProduction': {'ImageProcDirection': 1}}}
-                    prologue.get_satpos.return_value = None, None, None
-                    prologue.get_earth_radii.return_value = None, None
-                    epilogue = mock.MagicMock()
-                    epilogue.epilogue = {'ImageProductionStats':
-                                         {'ActualL15CoverageHRV':
-                                          {'LowerSouthLineActual': 1,
-                                           'LowerNorthLineActual': 8256,
-                                           'LowerEastColumnActual': 2877,
-                                           'LowerWestColumnActual': 8444,
-                                           'UpperSouthLineActual': 8257,
-                                           'UpperNorthLineActual': 11136,
-                                           'UpperEastColumnActual': 1805,
-                                           'UpperWestColumnActual': 7372}}}
-
-                    self.reader = HRITMSGFileHandler(
-                        'filename',
-                        {'platform_shortname': 'MSG3',
-                         'start_time': datetime(2016, 3, 3, 0, 0),
-                         'service': 'MSG'},
-                        {'filetype': 'info'},
-                        prologue,
-                        epilogue)
-                    ncols = 5568
-                    nlines = 464
-                    nbits = 10
-                    self.reader.fill_hrv = True
-                    self.reader.mda['number_of_bits_per_pixel'] = nbits
-                    self.reader.mda['number_of_lines'] = nlines
-                    self.reader.mda['number_of_columns'] = ncols
-                    self.reader.mda['data_field_length'] = nlines * ncols * nbits
-                    self.reader.mda['cfac'] = 5
-                    self.reader.mda['lfac'] = 5
-                    self.reader.mda['coff'] = 10
-                    self.reader.mda['loff'] = 10
-                    self.reader.mda['projection_parameters'] = {}
-                    self.reader.mda['projection_parameters']['a'] = 6378169.0
-                    self.reader.mda['projection_parameters']['b'] = 6356583.8
-                    self.reader.mda['projection_parameters']['h'] = 35785831.0
-                    self.reader.mda['projection_parameters']['SSP_longitude'] = 44
-                    self.reader.mda['projection_parameters']['SSP_latitude'] = 0.0
-                    self.reader.mda['orbital_parameters'] = {}
-                    self.reader.mda['orbital_parameters']['satellite_nominal_longitude'] = 47
-                    self.reader.mda['orbital_parameters']['satellite_nominal_latitude'] = 0.0
-                    self.reader.mda['orbital_parameters']['satellite_actual_longitude'] = 47.5
-                    self.reader.mda['orbital_parameters']['satellite_actual_latitude'] = -0.5
-                    self.reader.mda['orbital_parameters']['satellite_actual_altitude'] = 35783328
-                    self.reader.mda['segment_sequence_number'] = 18
-                    self.reader.mda['planned_start_segment_number'] = 1
-
-                    tline = np.zeros(nlines, dtype=[('days', '>u2'), ('milliseconds', '>u4')])
-                    tline['days'][1:-1] = 21246 * np.ones(nlines-2)  # 2016-03-03
-                    tline['milliseconds'][1:-1] = np.arange(nlines-2)
-                    self.reader.mda['image_segment_line_quality'] = {'line_mean_acquisition': tline}
+        prologue = setup.get_fake_prologue()
+        epilogue = {
+            'ImageProductionStats': {
+                'ActualL15CoverageHRV': {
+                    'LowerSouthLineActual': 1,
+                    'LowerNorthLineActual': 8256,
+                    'LowerEastColumnActual': 2877,
+                    'LowerWestColumnActual': 8444,
+                    'UpperSouthLineActual': 8257,
+                    'UpperNorthLineActual': 11136,
+                    'UpperEastColumnActual': 1805,
+                    'UpperWestColumnActual': 7372
+                }
+            }
+        }
+        self.start_time = datetime(2016, 3, 3, 0, 0)
+        self.nlines = 464
+        mda = setup.get_fake_mda(
+            nlines=self.nlines, ncols=5568, start_time=self.start_time
+        )
+        mda.update({
+            'segment_sequence_number': 18,
+            'planned_start_segment_number': 1
+        })
+        filename_info = setup.get_fake_filename_info(self.start_time)
+        self.reader = setup.get_fake_file_handler(
+            filename_info, mda, prologue, epilogue
+        )
+        self.reader.fill_hrv = True
 
     @mock.patch('satpy.readers.hrit_base.np.memmap')
     def test_read_hrv_band(self, memmap):
@@ -135,18 +93,15 @@ class TestHRITMSGFileHandlerHRV(unittest.TestCase):
         res = self.reader.read_band('HRV', None)
         self.assertEqual(res.shape, (464, 5568))
 
-    @mock.patch('satpy.readers.seviri_l1b_hrit.HRITMSGFileHandler._get_timestamps')
     @mock.patch('satpy.readers.seviri_l1b_hrit.HRITFileHandler.get_dataset')
     @mock.patch('satpy.readers.seviri_l1b_hrit.HRITMSGFileHandler.calibrate')
-    def test_get_dataset(self, calibrate, parent_get_dataset, _get_timestamps):
+    def test_get_dataset(self, calibrate, parent_get_dataset):
         """Test getting the hrv dataset."""
         key = make_dataid(name='HRV', calibration='reflectance')
-        info = {'units': 'units', 'wavelength': 'wavelength', 'standard_name': 'standard_name'}
-        timestamps = np.arange(0, 464, dtype='datetime64[ns]')
+        info = setup.get_fake_dataset_info()
 
         parent_get_dataset.return_value = mock.MagicMock()
         calibrate.return_value = xr.DataArray(data=np.zeros((464, 5568)), dims=('y', 'x'))
-        _get_timestamps.return_value = timestamps
         res = self.reader.get_dataset(key, info)
         self.assertEqual(res.shape, (464, 11136))
 
@@ -154,46 +109,22 @@ class TestHRITMSGFileHandlerHRV(unittest.TestCase):
         parent_get_dataset.assert_called_with(key, info)
         calibrate.assert_called_with(parent_get_dataset(), key['calibration'])
 
-        # Test attributes (just check if raw metadata is there and then remove it before checking the remaining
-        # attributes)
-        attrs_exp = info.copy()
-        attrs_exp.update({
-            'platform_name': self.reader.platform_name,
-            'sensor': 'seviri',
-            'satellite_longitude': self.reader.mda['projection_parameters']['SSP_longitude'],
-            'satellite_latitude': self.reader.mda['projection_parameters']['SSP_latitude'],
-            'satellite_altitude': self.reader.mda['projection_parameters']['h'],
-            'orbital_parameters': {'projection_longitude': 44,
-                                   'projection_latitude': 0.,
-                                   'projection_altitude': 35785831.0,
-                                   'satellite_nominal_longitude': 47,
-                                   'satellite_nominal_latitude': 0.0,
-                                   'satellite_actual_longitude': 47.5,
-                                   'satellite_actual_latitude': -0.5,
-                                   'satellite_actual_altitude': 35783328},
-            'georef_offset_corrected': self.reader.mda['offset_corrected']
-        })
-        self.assertIn('raw_metadata', res.attrs)
-        res.attrs.pop('raw_metadata')
-        self.assertDictEqual(attrs_exp, res.attrs)
+        self.assert_attrs_equal(res.attrs, setup.get_attrs_exp())
+        np.testing.assert_equal(
+            res['acq_time'],
+            setup.get_acq_time_exp(self.start_time, self.nlines)
+        )
 
-        # Test timestamps
-        self.assertTrue(np.all(res['acq_time'] == timestamps))
-        self.assertEqual(res['acq_time'].attrs['long_name'], 'Mean scanline acquisition time')
-
-    @mock.patch('satpy.readers.seviri_l1b_hrit.HRITMSGFileHandler._get_timestamps')
     @mock.patch('satpy.readers.seviri_l1b_hrit.HRITFileHandler.get_dataset')
     @mock.patch('satpy.readers.seviri_l1b_hrit.HRITMSGFileHandler.calibrate')
-    def test_get_dataset_non_fill(self, calibrate, parent_get_dataset, _get_timestamps):
+    def test_get_dataset_non_fill(self, calibrate, parent_get_dataset):
         """Test getting a non-filled hrv dataset."""
         key = make_dataid(name='HRV', calibration='reflectance')
         key.name = 'HRV'
-        info = {'units': 'units', 'wavelength': 'wavelength', 'standard_name': 'standard_name'}
-        timestamps = np.arange(0, 464, dtype='datetime64[ns]')
+        info = setup.get_fake_dataset_info()
         self.reader.fill_hrv = False
         parent_get_dataset.return_value = mock.MagicMock()
         calibrate.return_value = xr.DataArray(data=np.zeros((464, 5568)), dims=('y', 'x'))
-        _get_timestamps.return_value = timestamps
         res = self.reader.get_dataset(key, info)
         self.assertEqual(res.shape, (464, 5568))
 
@@ -201,32 +132,11 @@ class TestHRITMSGFileHandlerHRV(unittest.TestCase):
         parent_get_dataset.assert_called_with(key, info)
         calibrate.assert_called_with(parent_get_dataset(), key['calibration'])
 
-        # Test attributes (just check if raw metadata is there and then remove it before checking the remaining
-        # attributes)
-        attrs_exp = info.copy()
-        attrs_exp.update({
-            'platform_name': self.reader.platform_name,
-            'sensor': 'seviri',
-            'satellite_longitude': self.reader.mda['projection_parameters']['SSP_longitude'],
-            'satellite_latitude': self.reader.mda['projection_parameters']['SSP_latitude'],
-            'satellite_altitude': self.reader.mda['projection_parameters']['h'],
-            'orbital_parameters': {'projection_longitude': 44,
-                                   'projection_latitude': 0.,
-                                   'projection_altitude': 35785831.0,
-                                   'satellite_nominal_longitude': 47,
-                                   'satellite_nominal_latitude': 0.0,
-                                   'satellite_actual_longitude': 47.5,
-                                   'satellite_actual_latitude': -0.5,
-                                   'satellite_actual_altitude': 35783328},
-            'georef_offset_corrected': self.reader.mda['offset_corrected']
-        })
-        self.assertIn('raw_metadata', res.attrs)
-        res.attrs.pop('raw_metadata')
-        self.assertDictEqual(attrs_exp, res.attrs)
-
-        # Test timestamps
-        self.assertTrue(np.all(res['acq_time'] == timestamps))
-        self.assertEqual(res['acq_time'].attrs['long_name'], 'Mean scanline acquisition time')
+        self.assert_attrs_equal(res.attrs, setup.get_attrs_exp())
+        np.testing.assert_equal(
+            res['acq_time'],
+            setup.get_acq_time_exp(self.start_time, self.nlines)
+        )
 
     def test_pad_data(self):
         """Test the hrv padding."""
@@ -264,68 +174,21 @@ class TestHRITMSGFileHandlerHRV(unittest.TestCase):
                             (-30793529275853.656, -3720765401003.719, 14788916824891.568, -2926674655354.9604))
 
 
-class TestHRITMSGFileHandler(unittest.TestCase):
+class TestHRITMSGFileHandler(TestHRITMSGBase):
     """Test the HRITFileHandler."""
 
-    @mock.patch('satpy.readers.seviri_l1b_hrit.np.fromfile')
-    def setUp(self, fromfile):
+    def setUp(self):
         """Set up the hrit file handler for testing."""
-        m = mock.mock_open()
-        fromfile.return_value = np.array([(1, 2)], dtype=[('total_header_length', int),
-                                                          ('hdr_id', int)])
-
-        with mock.patch('satpy.readers.hrit_base.open', m, create=True) as newopen:
-            with mock.patch('satpy.readers.seviri_l1b_hrit.CHANNEL_NAMES'):
-                with mock.patch.object(HRITMSGFileHandler, '_get_hd', new=new_get_hd):
-                    newopen.return_value.__enter__.return_value.tell.return_value = 1
-                    prologue = mock.MagicMock()
-                    prologue.prologue = {"SatelliteStatus": {"SatelliteDefinition": {"SatelliteId": 324,
-                                                                                     "NominalLongitude": 47}},
-                                         'GeometricProcessing': {'EarthModel': {'TypeOfEarthModel': 2,
-                                                                                'NorthPolarRadius': 10,
-                                                                                'SouthPolarRadius': 10,
-                                                                                'EquatorialRadius': 10}},
-                                         'ImageDescription': {'ProjectionDescription': {'LongitudeOfSSP': 0.0},
-                                                              'Level15ImageProduction': {'ImageProcDirection': 1}}}
-                    prologue.get_satpos.return_value = None, None, None
-                    prologue.get_earth_radii.return_value = None, None
-
-                    self.reader = HRITMSGFileHandler(
-                        'filename',
-                        {'platform_shortname': 'MSG3',
-                         'start_time': datetime(2016, 3, 3, 0, 0),
-                         'service': 'MSG'},
-                        {'filetype': 'info'},
-                        prologue,
-                        mock.MagicMock())
-                    ncols = 3712
-                    nlines = 464
-                    nbits = 10
-                    self.reader.mda['number_of_bits_per_pixel'] = nbits
-                    self.reader.mda['number_of_lines'] = nlines
-                    self.reader.mda['number_of_columns'] = ncols
-                    self.reader.mda['data_field_length'] = nlines * ncols * nbits
-                    self.reader.mda['cfac'] = 5
-                    self.reader.mda['lfac'] = 5
-                    self.reader.mda['coff'] = 10
-                    self.reader.mda['loff'] = 10
-                    self.reader.mda['projection_parameters'] = {}
-                    self.reader.mda['projection_parameters']['a'] = 6378169.0
-                    self.reader.mda['projection_parameters']['b'] = 6356583.8
-                    self.reader.mda['projection_parameters']['h'] = 35785831.0
-                    self.reader.mda['projection_parameters']['SSP_longitude'] = 44
-                    self.reader.mda['projection_parameters']['SSP_latitude'] = 0.0
-                    self.reader.mda['orbital_parameters'] = {}
-                    self.reader.mda['orbital_parameters']['satellite_nominal_longitude'] = 47
-                    self.reader.mda['orbital_parameters']['satellite_nominal_latitude'] = 0.0
-                    self.reader.mda['orbital_parameters']['satellite_actual_longitude'] = 47.5
-                    self.reader.mda['orbital_parameters']['satellite_actual_latitude'] = -0.5
-                    self.reader.mda['orbital_parameters']['satellite_actual_altitude'] = 35783328
-
-                    tline = np.zeros(nlines, dtype=[('days', '>u2'), ('milliseconds', '>u4')])
-                    tline['days'][1:-1] = 21246 * np.ones(nlines-2)  # 2016-03-03
-                    tline['milliseconds'][1:-1] = np.arange(nlines-2)
-                    self.reader.mda['image_segment_line_quality'] = {'line_mean_acquisition': tline}
+        prologue = setup.get_fake_prologue()
+        epilogue = {}
+        self.start_time = datetime(2016, 3, 3, 0, 0)
+        self.nlines = 464
+        mda = setup.get_fake_mda(
+            nlines=self.nlines, ncols=3712, start_time=self.start_time)
+        filename_info = setup.get_fake_filename_info(self.start_time)
+        self.reader = setup.get_fake_file_handler(
+            filename_info, mda, prologue, epilogue
+        )
 
     def test_get_area_def(self):
         """Test getting the area def."""
@@ -360,18 +223,18 @@ class TestHRITMSGFileHandler(unittest.TestCase):
         res = self.reader.read_band('VIS006', None)
         self.assertEqual(res.shape, (464, 3712))
 
-    @mock.patch('satpy.readers.seviri_l1b_hrit.HRITMSGFileHandler._get_timestamps')
     @mock.patch('satpy.readers.seviri_l1b_hrit.HRITFileHandler.get_dataset')
     @mock.patch('satpy.readers.seviri_l1b_hrit.HRITMSGFileHandler.calibrate')
-    def test_get_dataset(self, calibrate, parent_get_dataset, _get_timestamps):
+    def test_get_dataset(self, calibrate, parent_get_dataset):
         """Test getting the dataset."""
         key = make_dataid(name='VIS006', calibration='reflectance')
-        info = {'units': 'units', 'wavelength': 'wavelength', 'standard_name': 'standard_name'}
-        timestamps = np.array([1, 2, 3], dtype='datetime64[ns]')
+        info = setup.get_fake_dataset_info()
 
         parent_get_dataset.return_value = mock.MagicMock()
-        calibrate.return_value = xr.DataArray(data=np.zeros((3, 3)), dims=('y', 'x'))
-        _get_timestamps.return_value = timestamps
+        calibrate.return_value = xr.DataArray(
+            data=np.zeros((self.reader.mda['number_of_lines'],
+                           self.reader.mda['number_of_columns'])),
+            dims=('y', 'x'))
 
         res = self.reader.get_dataset(key, info)
 
@@ -379,32 +242,11 @@ class TestHRITMSGFileHandler(unittest.TestCase):
         parent_get_dataset.assert_called_with(key, info)
         calibrate.assert_called_with(parent_get_dataset(), key['calibration'])
 
-        # Test attributes (just check if raw metadata is there and then remove it before checking the remaining
-        # attributes)
-        attrs_exp = info.copy()
-        attrs_exp.update({
-            'platform_name': self.reader.platform_name,
-            'sensor': 'seviri',
-            'satellite_longitude': self.reader.mda['projection_parameters']['SSP_longitude'],
-            'satellite_latitude': self.reader.mda['projection_parameters']['SSP_latitude'],
-            'satellite_altitude': self.reader.mda['projection_parameters']['h'],
-            'orbital_parameters': {'projection_longitude': 44,
-                                   'projection_latitude': 0.,
-                                   'projection_altitude': 35785831.0,
-                                   'satellite_nominal_longitude': 47,
-                                   'satellite_nominal_latitude': 0.0,
-                                   'satellite_actual_longitude': 47.5,
-                                   'satellite_actual_latitude': -0.5,
-                                   'satellite_actual_altitude': 35783328},
-            'georef_offset_corrected': self.reader.mda['offset_corrected']
-        })
-        self.assertIn('raw_metadata', res.attrs)
-        res.attrs.pop('raw_metadata')
-        self.assertDictEqual(attrs_exp, res.attrs)
-
-        # Test timestamps
-        self.assertTrue(np.all(res['acq_time'] == timestamps))
-        self.assertEqual(res['acq_time'].attrs['long_name'], 'Mean scanline acquisition time')
+        self.assert_attrs_equal(res.attrs, setup.get_attrs_exp())
+        np.testing.assert_equal(
+            res['acq_time'],
+            setup.get_acq_time_exp(self.start_time, self.nlines)
+        )
 
     def test_get_raw_mda(self):
         """Test provision of raw metadata."""
@@ -416,24 +258,6 @@ class TestHRITMSGFileHandler(unittest.TestCase):
 
         # Make sure _get_raw_mda() doesn't modify the original dictionary
         self.assertIn('loff', self.reader.mda)
-
-    def test_get_timestamps(self):
-        """Test getting the timestamps."""
-        tline = self.reader._get_timestamps()
-
-        # First and last scanline have invalid timestamps (space)
-        self.assertTrue(np.isnat(tline[0]))
-        self.assertTrue(np.isnat(tline[-1]))
-
-        # Test remaining lines
-        year = tline.astype('datetime64[Y]').astype(int) + 1970
-        month = tline.astype('datetime64[M]').astype(int) % 12 + 1
-        day = (tline.astype('datetime64[D]') - tline.astype('datetime64[M]') + 1).astype(int)
-        msec = (tline - tline.astype('datetime64[D]')).astype(int)
-        self.assertTrue(np.all(year[1:-1] == 2016))
-        self.assertTrue(np.all(month[1:-1] == 3))
-        self.assertTrue(np.all(day[1:-1] == 3))
-        self.assertTrue(np.all(msec[1:-1] == np.arange(len(tline) - 2)))
 
     def test_get_header(self):
         """Test getting the header."""

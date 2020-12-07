@@ -42,13 +42,22 @@ References:
 
 from satpy.readers.file_handlers import BaseFileHandler
 from satpy.readers.seviri_base import (SEVIRICalibrationHandler,
-                                       CHANNEL_NAMES, SATNUM)
+                                       CHANNEL_NAMES, SATNUM,
+                                       get_cds_time,
+                                       add_scanline_acq_time,
+                                       SatelliteLocatorFactory,
+                                       NoValidOrbitParams)
+import numpy as np
 import xarray as xr
 
 from satpy.readers._geos_area import get_area_definition
 from satpy import CHUNK_SIZE
 
 import datetime
+import logging
+
+
+logger = logging.getLogger('nc_msg')
 
 
 class NCSEVIRIFileHandler(BaseFileHandler):
@@ -61,6 +70,7 @@ class NCSEVIRIFileHandler(BaseFileHandler):
         self.ext_calib_coefs = ext_calib_coefs or {}
         self.nc = None
         self.mda = {}
+        self.satpos = None
         self.reference = datetime.datetime(1958, 1, 1)
         self._read_file()
 
@@ -131,6 +141,9 @@ class NCSEVIRIFileHandler(BaseFileHandler):
         self.platform_id = int(self.nc.attrs['satellite_id'])
 
         # Correct for the scan line order
+        # TODO: Move _add_scanline_acq_time() call to the end of the method
+        #       once flipping is removed.
+        self._add_scanline_acq_time(dataset, dataset_id)
         dataset = dataset.sel(y=slice(None, None, -1))
 
         # Calibrate the data as needed
@@ -141,10 +154,22 @@ class NCSEVIRIFileHandler(BaseFileHandler):
         dataset.attrs.update(dataset_info)
         dataset.attrs['platform_name'] = "Meteosat-" + SATNUM[self.platform_id]
         dataset.attrs['sensor'] = 'seviri'
+        actual_lon, actual_lat, actual_alt = self._get_satpos()
         dataset.attrs['orbital_parameters'] = {
             'projection_longitude': self.mda['projection_parameters']['ssp_longitude'],
             'projection_latitude': 0.,
-            'projection_altitude': self.mda['projection_parameters']['h']}
+            'projection_altitude': self.mda['projection_parameters']['h'],
+            'satellite_nominal_longitude': float(
+                self.nc.attrs['nominal_longitude']
+            ),
+            'satellite_nominal_latitude': 0.0,
+        }
+        if actual_lon is not None:
+            dataset.attrs['orbital_parameters'].update({
+                'satellite_actual_longitude': actual_lon,
+                'satellite_actual_latitude': actual_lat,
+                'satellite_actual_altitude': actual_alt,
+            })
 
         # remove attributes from original file which don't apply anymore
         strip_attrs = ["comment", "long_name", "nc_key", "scale_factor", "add_offset", "valid_min", "valid_max"]
@@ -254,6 +279,71 @@ class NCSEVIRIFileHandler(BaseFileHandler):
         area_extent = (ll_c, ll_l, ur_c, ur_l)
 
         return area_extent
+
+    def _add_scanline_acq_time(self, dataset, dataset_id):
+        if dataset_id['name'] == 'HRV':
+            # TODO: Enable once HRV reading has been fixed.
+            return
+            # days, msecs = self._get_acq_time_hrv()
+        else:
+            days, msecs = self._get_acq_time_visir(dataset_id)
+        acq_time = get_cds_time(days.values, msecs.values)
+        add_scanline_acq_time(dataset, acq_time)
+
+    def _get_acq_time_hrv(self):
+        day_key = 'channel_data_hrv_data_l10_line_mean_acquisition_time_day'
+        msec_key = 'channel_data_hrv_data_l10_line_mean_acquisition_msec'
+        days = self.nc[day_key].isel(channels_hrv_dim=0)
+        msecs = self.nc[msec_key].isel(channels_hrv_dim=0)
+        return days, msecs
+
+    def _get_acq_time_visir(self, dataset_id):
+        band_idx = list(CHANNEL_NAMES.values()).index(dataset_id['name'])
+        day_key = 'channel_data_visir_data_l10_line_mean_acquisition_time_day'
+        msec_key = 'channel_data_visir_data_l10_line_mean_acquisition_msec'
+        days = self.nc[day_key].isel(channels_vis_ir_dim=band_idx)
+        msecs = self.nc[msec_key].isel(channels_vis_ir_dim=band_idx)
+        return days, msecs
+
+    def _get_satpos(self):
+        """Get actual satellite position in geodetic coordinates (WGS-84).
+
+        Evaluate orbit polynomials at the start time of the scan.
+
+        TODO: Factorize once #1457 is merged.
+
+        Returns: Longitude [deg east], Latitude [deg north] and Altitude [m]
+        """
+        if self.satpos is None:
+            a = self.mda['projection_parameters']['a']
+            b = self.mda['projection_parameters']['b']
+            time = self.start_time
+            start_times_poly = get_cds_time(
+                days=self.nc['orbit_polynomial_start_time_day'].values,
+                msecs=self.nc['orbit_polynomial_start_time_msec'].values
+            )
+            end_times_poly = get_cds_time(
+                days=self.nc['orbit_polynomial_end_time_day'].values,
+                msecs=self.nc['orbit_polynomial_end_time_msec'].values
+            )
+            orbit_polynomial = {
+                'StartTime': np.array([start_times_poly]),
+                'EndTime': np.array([end_times_poly]),
+                'X': self.nc['orbit_polynomial_x'].values,
+                'Y': self.nc['orbit_polynomial_y'].values,
+                'Z': self.nc['orbit_polynomial_z'].values,
+            }
+            factory = SatelliteLocatorFactory(orbit_polynomial)
+            sat_locator = factory.get_satellite_locator(time)
+            try:
+                lon, lat, alt = sat_locator.get_satpos_geodetic(time, a, b)
+            except NoValidOrbitParams as err:
+                logger.warning(err)
+                lon = lat = alt = None
+
+            # Cache results
+            self.satpos = lon, lat, alt
+        return self.satpos
 
 
 class NCSEVIRIHRVFileHandler(BaseFileHandler, SEVIRICalibrationHandler):

@@ -395,6 +395,7 @@ class SEVIRICalibrationAlgorithm:
         reflectances for SEVIRI warm channels: https://tinyurl.com/y67zhphm
         """
         reflectance = np.pi * data * 100.0 / solar_irradiance
+        return reflectance
         return apply_earthsun_distance_correction(reflectance, self._scan_time)
 
 

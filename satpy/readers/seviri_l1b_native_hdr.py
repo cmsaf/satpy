@@ -78,13 +78,17 @@ class Msg15NativeHeaderRecord(object):
     SEVIRI Level 1.5 header for native-format
     """
 
-    def get(self):
-
-        # 450400 bytes
-        record = [
-            ('15_MAIN_PRODUCT_HEADER', L15MainProductHeaderRecord().get()),
-            ('15_SECONDARY_PRODUCT_HEADER',
-             L15SecondaryProductHeaderRecord().get()),
+    def get(self, with_archive_header):
+        # 450400 bytes including archive header
+        # 445286 bytes excluding archive header
+        record = []
+        if with_archive_header:
+            record += [
+                ('15_MAIN_PRODUCT_HEADER', L15MainProductHeaderRecord().get()),
+                ('15_SECONDARY_PRODUCT_HEADER',
+                 L15SecondaryProductHeaderRecord().get()),
+            ]
+        record += [
             ('GP_PK_HEADER', GSDTRecords.gp_pk_header),
             ('GP_PK_SH1', GSDTRecords.gp_pk_sh1),
             ('15_DATA_HEADER', L15DataHeaderRecord().get())
@@ -1018,10 +1022,18 @@ class HritPrologue(L15DataHeaderRecord):
         return np.dtype(record).newbyteorder('>')
 
 
+def get_native_header(with_archive_header=True):
+    """Get Native format header type.
+
+    There are two variants, one including an ASCII archive header and one
+    without that header. The header is included if the data are ordered
+    through the data center.
+    """
+    return Msg15NativeHeaderRecord().get(with_archive_header)
+
 hrit_epilogue = np.dtype(
     Msg15NativeTrailerRecord().seviri_l15_trailer).newbyteorder('>')
 hrit_prologue = HritPrologue().get()
 impf_configuration = np.dtype(
     L15DataHeaderRecord().impf_configuration).newbyteorder('>')
-native_header = Msg15NativeHeaderRecord().get()
 native_trailer = Msg15NativeTrailerRecord().get()

@@ -64,7 +64,7 @@ from satpy.readers.seviri_base import (SEVIRICalibrationHandler,
                                        get_cds_time,
                                        NoValidOrbitParams,
                                        SatelliteLocatorFactory)
-from satpy.readers.seviri_l1b_native_hdr import (GSDTRecords, native_header,
+from satpy.readers.seviri_l1b_native_hdr import (GSDTRecords, get_native_header,
                                                  native_trailer)
 from satpy.readers._geos_area import get_area_definition
 
@@ -99,9 +99,15 @@ class NativeMSGFileHandler(BaseFileHandler):
 
         # Read header, prepare dask-array, read trailer
         # Available channels are known only after the header has been read
+        self.header_type = get_native_header(self._has_archive_header())
         self._read_header()
         self.dask_array = da.from_array(self._get_memmap(), chunks=(CHUNK_SIZE,))
         self._read_trailer()
+
+    def _has_archive_header(self):
+        """Check whether the file includes an archive header."""
+        with open(self.filename, mode='rb') as istream:
+            return istream.read(6).decode() == 'Format'
 
     @property
     def start_time(self):
@@ -170,7 +176,7 @@ class NativeMSGFileHandler(BaseFileHandler):
         """Get the memory map for the SEVIRI data."""
         with open(self.filename) as fp:
             data_dtype = self._get_data_dtype()
-            hdr_size = native_header.itemsize
+            hdr_size = self.header_type.itemsize
 
             return np.memmap(fp, dtype=data_dtype,
                              shape=(self.mda['number_of_lines'],),
@@ -179,9 +185,24 @@ class NativeMSGFileHandler(BaseFileHandler):
     def _read_header(self):
         """Read the header info."""
         data = np.fromfile(self.filename,
-                           dtype=native_header, count=1)
+                           dtype=self.header_type, count=1)
 
         self.header.update(recarray2dict(data))
+
+        if '15_SECONDARY_PRODUCT_HEADER' not in self.header:
+            # No archive header, that means we have a complete file
+            # including all channels.
+            self.header['15_SECONDARY_PRODUCT_HEADER'] = {
+                'NorthLineSelectedRectangle': {'Value': VISIR_NUM_LINES},
+                'SouthLineSelectedRectangle': {'Value': 1},
+                'EastColumnSelectedRectangle': {'Value': 1},
+                'WestColumnSelectedRectangle': {'Value': VISIR_NUM_COLUMNS},
+                'NumberColumnsVISIR': {'Value': VISIR_NUM_COLUMNS},
+                'NumberLinesVISIR': {'Value': VISIR_NUM_LINES},
+                'NumberColumnsHRV': {'Value': HRV_NUM_COLUMNS},
+                'NumberLinesHRV': {'Value': HRV_NUM_COLUMNS},
+                'SelectedBandIDs': {'Value': 'XXXXXXXXXXXX'}
+            }
 
         data15hd = self.header['15_DATA_HEADER']
         sec15hd = self.header['15_SECONDARY_PRODUCT_HEADER']
@@ -244,7 +265,7 @@ class NativeMSGFileHandler(BaseFileHandler):
 
         # HRV Channel - check if the area is reduced in east west
         # direction as this affects the number of columns in the file
-        cols_hrv_hdr = int(sec15hd['NumberColumnsHRV']['Value'])
+        cols_hrv_hdr = 11136
         if ncolumns < VISIR_NUM_COLUMNS:
             cols_hrv = cols_hrv_hdr
         else:
@@ -258,7 +279,7 @@ class NativeMSGFileHandler(BaseFileHandler):
 
     def _read_trailer(self):
 
-        hdr_size = native_header.itemsize
+        hdr_size = self.header_type.itemsize
         data_size = (self._get_data_dtype().itemsize *
                      self.mda['number_of_lines'])
 

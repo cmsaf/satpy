@@ -265,7 +265,7 @@ class NativeMSGFileHandler(BaseFileHandler):
 
         # HRV Channel - check if the area is reduced in east west
         # direction as this affects the number of columns in the file
-        cols_hrv_hdr = 11136
+        cols_hrv_hdr = int(sec15hd['NumberColumnsHRV']['Value'])
         if ncolumns < VISIR_NUM_COLUMNS:
             cols_hrv = cols_hrv_hdr
         else:
